@@ -1,0 +1,616 @@
+---
+title: "Titanic - Kaggle Challenge"
+author: "Antonella Azzarello"
+date: "3/7/2021"
+output: 
+  pdf_document:
+    df_print: kable
+  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+## due to newer version of R, this ensures correct seeding
+RNGkind(sample.kind = "Rounding") 
+```
+
+**Data Source - Kaggle**
+
+Source of the Titanic Kaggle Challenge:  <https://www.kaggle.com/c/titanic/overview>.
+
+**Extras:**
+
+*Analysis completed while listening to the Titanic: Motion Picture Soundtrack by James Horner, for feels.*
+
+***
+
+**Libraries Needed:**
+```{r libraries, message = FALSE, warning = FALSE}
+library(kableExtra)   # Tables
+library(ggplot2)      # Visualization
+library(Amelia)       # Missing Viz
+library(mice)         # Imputation
+library(Hmisc)        # Moar Imputation
+library(dplyr)        # Data Manipulation
+library(gridExtra)    # Plot Grids
+library(scales)       # Visualization Assistance
+library(corrplot)     # Correlation Plot
+library(tidyverse)    # All the things 
+library(summarytools) # Summary Tools
+library(caret)        # Model Training/K-Fold
+library(MLmetrics)    # Quick ML Metrics (Accuracy, F1, etc)
+library(e1071)        # Support Vector Machines
+      
+```
+
+***
+
+**The Goal**
+
+Per Kaggle, the goal of this challenge is to use Machine Learning to create a model that predicts which passengers survived the Titanic shipwreck.  
+
+
+## Data Exploration
+
+We begin by loading in the training dataset and taking a quick look at the data. For the purposes of condensing the table view, the attribute `Name` was excluded. 
+
+As some of the data had outright missing values, these were replaced with 'NA's for quantifying purposes later on. 
+
+```{r load data, echo = FALSE}
+dat.train = read.csv('train.csv', header=T, na.strings = c("", "NA"))
+
+kable(head(dat.train[,-4]), booktabs = TRUE) %>%
+  kable_styling(latex_options = "scale_down")
+```
+
+We have a total of 891 observations within our Training dataset. We see that about 62% of the observations within the `Train` dataset did not survive. 
+
+```{r, echo = FALSE}
+sur = kable(table(dat.train$Survived), col.names = c("Survived","Passengers")) %>%
+  kable_styling(position = "center")
+sur
+```
+
+
+***
+
+ **Data Dictionary**
+
+   * PassengerId = ID of passenger
+   * Survived = if passenger survived; 0 = No, 1 = Yes
+   * Pclass = Ticket class; 1 = 1st/Upper, 2 = 2nd/Middle, 3 = 3rd/Lower
+   * Name = Name of passenger
+   * Sex = Passgener's sex/gender; male/female
+   * Age = Age of passenger in years
+   * Sibsp = # of siblings / spouses aboard with passenger
+   * Parch = # of parents / children aboard with passenger
+   * Ticket = Ticket number
+   * Fare = Passenger fare
+   * Cabin = Cabin number
+   * Embarked = Port of embarkation; C = Cherbourg, Q = Queenstown, S = Southampton
+   
+***
+
+Continuing to explore the data, the focus will remain on the `Train` dataset, as for predictive purposes, it is expected that the records within the `Test` dataset have remained unseen. All learnings of the data will be based purely on the `Train` dataset. 
+
+*Worth noting, I did read some methods in which the `Train` and `Test` datasets were combined for better imputation power. I disagree with this approach, because based on the Kaggle Challenge parameters, the `Test` data is to remain unseen. In the real-world, we would not be able to use true test data to better impute missing values within our training dataset. This would pose a data leakage risk.* 
+
+**Quick Data Adjustments**
+
+Given our variable of interest, we need to ensure `Survived` is categorized as a factor. With the information known, another quick change is to categorize `Pclass` as an ordinal categorical variable. This is needed because `Pclass` 1 is ranked higher than `Pclass` 2, and so forth. 
+
+```{r, echo = FALSE}
+dat.train$Survived = factor(dat.train$Survived)
+dat.train$Pclass = factor(dat.train$Pclass, order = TRUE, levels = c(3,2,1))
+```
+
+
+**Missing Values**
+
+We visualize the missing values a couple of ways. First we look across all records to determine which attributes contain missing values. 
+
+We have missing values within the attributes, `Cabin`, `Age`, and `Embarked`. Given there appears to be a large number of missing values for `Cabin`, imputation may not make sense here. 
+
+```{r, echo = FALSE, fig.width = 8}
+missmap(dat.train, col=c("black", "grey"))
+
+```
+
+
+Next, we look at another quick visual to understand the combinations of missing values. While this doesn't tell us too much more, it helps visualize a bit more clearly where there is overlap of missing values across attributes. 
+
+```{r, echo = FALSE, results = 'hide'}
+md.pattern(dat.train, rotate.names = TRUE)
+```
+
+Quantifying the amount of missing values, `Cabin` has 687 missing values, `Age` with 177, and `Embarked` missing only 2 values. Given there are 891 observations in our Training data set, the missing values for `Cabin` are substantial; about 77% of `Cabin` values are missing. 
+
+```{r, echo = FALSE}
+missing.cab = sum(is.na(dat.train$Cabin))
+missing.age = sum(is.na(dat.train$Age))
+missing.emb = sum(is.na(dat.train$Embarked))
+
+df = c("Cabin", "Age", "Embarked")
+df = rbind(df, c(missing.cab, missing.age, missing.emb)) 
+
+
+kable(df) %>%
+  kable_styling(position = "center")
+
+```
+
+
+***
+
+**Predictors/Features**
+
+Before we address how to handle the missing values within the data, we first look at how each predictor relates to the survival of a passenger. 
+
+As mentioned earlier, based on the data within the `Train` dataset, about 62% of passengers did not survive. 
+
+```{r, echo=FALSE, fig.width = 3, fig.height = 2, fig.align = 'center', message = FALSE}
+
+ggplot(data = dat.train, aes(x=Survived)) +
+  geom_bar(stat = 'count', fill = 'royalblue3') +
+  ylab("Passengers") +
+  ggtitle("Titanic Passengers Survival") +
+  geom_text(stat = 'count', aes(label = ..count..), vjust = -1) +
+  expand_limits(y = c(0,800)) +
+  theme_classic()
+
+```
+
+**Pclass**
+
+We observe that survival of the passengers varies across `PClass`. There are far more survivors within `PClass` 1 than there are compared to the lower classes. Based on this behavior difference across classes, `Pclass` is most likely a good predictor to use to determine survival. 
+
+
+```{r, echo=FALSE, fig.width = 4, fig.height = 3.25, fig.align = 'center', message = FALSE}
+dat.train %>%
+  group_by(Pclass, Survived) %>%
+  summarise(count=n()) %>%
+  mutate(pct = count/sum(count)) %>%
+  mutate(Pclass = factor(Pclass, levels=c(1,2,3))) %>%
+  
+  ggplot(aes(x = Pclass, y = pct, fill = Survived)) +
+  geom_bar(position = 'dodge', stat = 'identity') + 
+  geom_text(aes(label=paste0(round(pct*100,0),"%"),
+            y=pct+0.012), size=4, 
+            nudge_x = c(-.23,.23), vjust = -.1)  +
+  scale_y_continuous(labels = scales::percent) +
+  ylab("Percent of Class") +  
+  xlab("Passenger Class") +
+  ggtitle("Titanic Passengers Survival by Class") +
+  theme_classic()
+```
+
+**Sex**
+
+While there were more males aboard the Titanic, fewer survived, in comparison to females. 81% of males on the ship did not survive, compared to 26% of non-surviving females. 
+
+`Sex` also appears to be a good predictor of Survival, based on this quick glance. 
+
+```{r, echo = FALSE, message = FALSE, fig.height= 3}
+
+dat.train %>%
+  group_by(Sex, Survived) %>%
+  summarise(count=n()) %>%
+  mutate(pct = count/sum(count)) %>%
+  
+  ggplot(aes(x = Sex, y = pct, fill = Survived)) +
+  geom_bar(position = 'dodge', stat = 'identity') + 
+  geom_text(aes(label=paste0(round(pct*100,0),"%"),
+            y=pct+0.012), size=4, 
+            nudge_x = c(-.23,.23), vjust = -.1)  +
+  scale_y_continuous(labels = scales::percent, 
+                     limits = c(0,.85)) +
+  labs(y = "") +
+  theme_classic() -> sex.plot
+
+dat.train %>%
+  group_by(Sex) %>%
+  summarise(count=n(), .groups = 'drop') %>%
+  mutate(pct = count/sum(count)) %>%
+  
+  ggplot(aes(x=Sex, y = pct)) +
+  geom_bar(position = 'dodge', stat = 'identity', 
+           fill = 'royalblue3') + 
+  geom_text(aes(label=paste0(round(pct*100,0),"%"),
+            y=pct+0.012), size=4, 
+            vjust = -.1)  +
+  scale_y_continuous(labels = scales::percent, 
+                     limits = c(0,.85)) +
+  labs(y = "") +
+  theme_classic() -> pass.plot
+
+
+
+grid.arrange(pass.plot, sex.plot, ncol = 2, nrow = 1, 
+             widths = c(1.7, 2.7), 
+             top = "Overall vs Survival")
+```
+
+**Age**
+
+Most passengers were between the ages of 20 and 40. There also appears to have been a larger share of very young female passengers, in comparison to male -- while males had a wider spread of ages, ranging to 80.  
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE,fig.height = 3, fig.align = 'center'}
+
+ggplot(dat.train, aes(x=Age)) + 
+  geom_density(fill = 'royalblue3') +
+  ylab("Density") + 
+  theme_classic() -> density.plot
+
+ggplot(dat.train, aes(x=Age)) + 
+  geom_density(aes(fill = Sex)) +
+  ylab("") + 
+  facet_grid(Sex ~ .) +
+  theme_classic() -> dens_sex.plot
+
+
+grid.arrange(density.plot, dens_sex.plot, ncol = 2, nrow = 1, 
+             widths = c(2.7, 3), 
+             top = "Overall Age Density, Age Density by Sex")
+```
+
+Grouping the `Age` into ranges, we see the group to have the largest amount of non-survivors is 20-30. Also included in the plot, is a reminder that we have several missing ages within our passengers, for both survivors, and non-survivors. 
+
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE,fig.height = 4.5, fig.align = 'center'}
+
+## binning the ages
+dat.train$age_range = cut(dat.train$Age, c(0,10,20,30,40,50,60,70,80,100))
+
+ggplot(dat.train, aes(x = age_range, fill=Survived)) +
+  geom_bar(position = position_dodge()) +
+  geom_text(stat='count', aes(label=stat(count)), 
+            position = position_dodge(width=1), 
+            vjust=-0.5) +
+  ylab("Count of Passengers") +
+  xlab("Age Range") +
+  ggtitle("Titanic Passengers Survival by Age") +
+  theme_classic()
+
+## dropped new/extra variable
+dat.train = dat.train[,-13]
+
+```
+
+
+**SibSp**
+
+The majority of passengers traveled alone, as seen in the column with 0 `SibSp`, indicating they did not have any Siblings nor Spouses traveling with them. Survival, if you were alone was higher than if you were not, however the largest survival difference is seen from 1 to 2 siblings or spouses. Anyone traveling with more than 1 sibling/spouse, had a far less likelihood of surviving. 
+
+```{r, echo = FALSE, message = FALSE, fig.height=2, fig.align = 'center'}
+
+ggplot(data = dat.train, aes(x=SibSp, fill = Survived)) +
+  geom_bar(position = position_dodge()) +
+  ylab("Passengers") +
+  ggtitle("Titanic Passengers Survival by Sibling/Spouse") +
+  xlab("Number of Siblings/Spouses") +
+  theme_classic()
+```
+
+
+**Parch**
+
+`Parch` represents the number of parents or children traveling with each passenger. This is similar to `SibSp`, but not quite the same. Again, across the different groups, the passengers traveling alone had the highest amount of survivors. However, the dip in survivor quantity is after 2 or more `Parch`, rather than more than 1, as seen with `SibSp`. This is most likely children that were traveling, as the only child, with their 2 parents, and would have categorized in Group 1 of `SibSp`. 
+
+```{r, echo = FALSE, message = FALSE,fig.height=2, fig.align = 'center'}
+
+ggplot(data = dat.train, aes(x=Parch, fill = Survived)) +
+  geom_bar(position = position_dodge()) +
+  ylab("Passengers") +
+  ggtitle("Titanic Passengers Survival, by Parents/Children") +
+  xlab("Number of Parents/Children") +
+  theme_classic()
+
+```
+
+
+**Other Viz**
+
+There are many other iterations of visualizations that can be created, however, based on the high level overview, we have a good understanding of some of the main predictors we will use to build the Survival Prediction Model. 
+
+
+***
+
+
+**Correlations**
+
+After sub-setting the numeric and some of the categorical variable, and adjusting the categorical variables to dummy variables, we were able to look at a correlation matrix of the following variables: `Survived`, `Pclass`, `Sex`, `Age`, `SibSp`, `Parch` and `Fare`. Overall, there doesn't appear to have very strong correlations across many of the variables. 
+
+The strongest relationships among the listed predictors and `Survived`, are `Pclass` and `Sex`. There also appears to be a relationship between `Fare` and `Pclass`, which makes sense, given the higher class passengers most likely paid a higher fare price to board. 
+
+```{r, echo = FALSE, fig.height = 4.5}
+
+## subset data for correlation matrix
+corr.train = dat.train[c(2,3,5,6,7,8,10)]
+
+corr.train$Survived = as.numeric(as.character(corr.train$Survived))
+corr.train$Pclass = as.numeric(as.character(corr.train$Pclass))
+corr.train$Sex = as.factor(corr.train$Sex)
+corr.train$Sex = ifelse(corr.train$Sex == "female", 0, 1)
+
+
+## using only complete observations when creating correlation matrix
+corr = cor(corr.train, use = "pairwise.complete.obs")
+
+## create correlation matrix
+corrplot(corr, method = "number", type = "lower",
+         tl.col = "black", tl.srt = 45)
+
+```
+
+## Data Imputation & Cleaning
+
+**Cabin**
+
+As `Cabin` had such a large amount of missing data, I decided to drop this predictor. I initially felt I could use `Fare` to predict the missing values of `Cabin` - though then I would be concerned about introducing unnecessary multicolinearity. Given `Fare` has a complete set of data within the training dataset, I moved forward with this and dropped `Cabin` from the dataset going forward.
+
+```{r, echo = FALSE}
+
+## drop Cabin from data set
+dat.train_cln = dat.train[,-11]
+
+```
+
+**Embark & Age**
+
+Since `Embark` only had a couple missing values, I will replace these with the most common value seen within `Embark`. As seen within the frequency table, the most common value for `Embark` is "S" (Southampton). 
+
+Given the `Age` variable is close to normally distributed, I used `method = norm` for imputation using the MICE algorithm. This takes into account all the values within the dataset, excluding the `PassengerId` attribute. 
+
+```{r, echo = FALSE, fig.align = "center"}
+
+## Frequency table
+
+kable(round(freq(dat.train$Embarked),2))
+
+```
+
+
+We also take a quick pulse of our mean and standard deviation for the `Age` variable, so we can verify these remain marginally close once we have completed imputation of this variable. 
+
+```{r, echo = FALSE, comment = NA}
+
+summary(dat.train_cln$Age)
+round(sd(dat.train_cln$Age, na.rm = TRUE),2)
+
+```
+
+
+### ** *Imputation Magic Happening...* **
+
+
+```{r, echo = FALSE, include = FALSE}
+
+## quick check for NAs
+sapply(dat.train_cln, function(x) sum(is.na(x)))
+
+## multiple_imputations (based on other data in the dataset)
+## excluding the Passenger ID as impact
+
+ini = mice(dat.train_cln, maxit = 0)
+meth = ini$meth
+meth[c("Age")] = "norm"
+meth[c("PassengerId")] = ""
+post = ini$post
+post["Age"] = "imp[[j]][, i] <- squeeze(imp[[j]][, i], c(1, 100))"
+imp = mice(dat.train_cln, m = 100, maxit = 50, meth=meth, post=post, print=FALSE, seed = 1)
+
+
+## all iterations in a long list
+imp = complete(imp, action = 'long')
+
+## aggregating the iterations by mean for each ID.
+imp.age = aggregate(imp[,8], by = list(imp$.id), FUN = mean)
+colnames(imp.age) = c("PassegnerId", "Age")
+
+## overwrite the Age column in dat.train_cln dataframe with
+## imp.age data
+
+dat.train_cln$Age <- imp.age$Age
+
+```
+
+
+We confirm with a quick view of the summary statistics, as well as the standard deviation, both the mean and stdev look to be close to what they were prior to imputing the data for `Age`. This is the expected result, and we are good to move forward.
+
+```{r, echo = FALSE,comment = NA }
+
+summary = summary(dat.train_cln$Age)
+print(summary)
+
+round(sd(dat.train_cln$Age),2)
+```
+
+```{r, echo = FALSE, include = FALSE}
+
+## Embark still has NAs
+sapply(dat.train_cln, function(x) sum(is.na(x)))
+
+## manually imputing based on the above frequency table
+dat.train_cln$Embarked[is.na(dat.train_cln$Embarked)] = "S"
+
+```
+
+We check one last time to ensure all NA values have been addressed through imputation. We can confirm this is now true for both `Age` and `Embarked`.
+
+```{r, echo = FALSE, comment = NA}
+## one last check
+sapply(dat.train_cln, function(x) sum(is.na(x)))
+```
+
+
+One final look at the data...
+
+```{r, echo = FALSE, comment = NA}
+
+## excludes PassengerId
+summary(dat.train_cln[,-1])
+```
+
+
+***
+
+## Modeling Building
+
+
+### Split into Training and Validation datasets
+
+
+We are moving forward with the following predictors:
+
+   * Pclass
+   * Sex
+   * Age
+   * Sibsp
+   * Parch
+   * Fare
+   * Embarked
+   
+Since there aren't *many* predictors to begin with, and they are not highly correlated, for the purposes of this analysis, I'm including them all in the model build. 
+
+The first model attempt will be a simple Logistic Regression, using K=10 Cross Validation Folds. 
+
+```{r, echo = FALSE, comment = NA, include = FALSE}
+
+## Logistic Regression Model
+
+## for ease of use, changing replicating data set to be 
+## called just 'dat'
+
+dat = dat.train_cln[,-c(1,4,9)]
+
+set.seed(1)
+## create folds, 1 to the number of rows of our data
+folds = createFolds(1:nrow(dat), k=10)
+## results, different indexes for each fold
+
+## create empty lists
+res_log = list()
+res_log2 = list()
+
+for(i in 1:10) {
+  train = setdiff(1:nrow(dat), folds[[i]])
+  test = folds[[i]]
+  
+  log = glm(as.factor(Survived) ~ ., data=dat[train,], 
+             family = 'binomial')
+  
+  preds = predict(log, dat[test,], type = 'response')
+  preds = preds > .5
+  
+  true = dat[test,]$Survived ## Survived as 1 is 'Yes' here
+  true = true == 1
+  
+  res_log[[i]] = F1_Score(true, preds)
+  res_log2[[i]] = Accuracy(true, preds)
+}
+unlist(res_log)
+unlist(res_log2)
+
+```
+
+To assess the Logistic Regression model's performance, I am looking at the **F1-Score**, as well as the **Accuracy**. 
+
+While **Accuracy** looks at the overall *True Positives* and *True Negatives* over all possible cases, **F1-Score** does a better job looking at the incorrectly classified cases. **F1-Score** may be a better metric to compare when looking at this data, given the slight imbalance of class distribution within the `Survived` variable. 
+
+For example, it wouldn't be ideal if we classified a Passenger as non-survived, when they in fact, did survive. Though, I am not entirely sure the purposes of how this model would be used - perhaps if trying to take a headcount after a similar sized ship sank, then we would definitely want to pay more attention to the incorrectly classified Passengers. 
+
+**F1-Score**
+```{r, echo = FALSE, comment = NA}
+## F1 Score
+mean(unlist(res_log))
+```
+
+**Accuracy**
+```{r, echo = FALSE, comment = NA}
+## Accuracy
+mean(unlist(res_log2))
+```
+
+The next model build type is a Support Vector Machine, using a radial kernel. SVM classifier model helps us work with non-linear class boundaries; specifically for binary classification.
+
+The radial kernel works with local behavior; only nearby training observations have an effect on the class label of a test observation. 
+
+Ways to improve this model would be to find the best cost parameter for the SVM using cross-validation. The cost parameter impacts the margin of the boundaries; the smaller the cost the wider the margins, resulting in a higher chance of misclassifications. However, we don't want the cost to be too much higher, as we run the risk of overfitting the data, and creating an overly rigid boundary. 
+
+```{r, echo = FALSE, include = FALSE}
+set.seed(1)
+
+## create folds, 1 to the number of rows of our data
+folds = createFolds(1:nrow(dat), k=10)
+## results, different indexes for each fold
+
+## create empty lists
+res_svm = list()
+res_svm2 = list()
+
+for(i in 1:10) {
+  train = setdiff(1:nrow(dat), folds[[i]])
+  test = folds[[i]]
+  
+  svm = svm(as.factor(Survived) ~ ., data=dat[train,], 
+            kernel = "radial",
+             cross = 10, type='C', cost = 10)
+
+  preds = predict(svm, dat[test,])
+  
+  true = dat[test,]$Survived ## Cancer as 2 is 'Yes' here
+  
+  res_svm[[i]] = F1_Score(true, preds)
+  res_svm2[[i]] = Accuracy(true, preds)
+  
+}
+unlist(res_svm)
+unlist(res_svm2)
+
+```
+
+
+
+**F1-Score**
+```{r, echo = FALSE, comment = NA}
+
+## F1-Score
+mean(unlist(res_svm))
+
+```
+
+**Accuracy**
+```{r,echo = FALSE, comment = NA}
+
+## Accuracy
+mean(unlist(res_svm2))
+
+```
+
+
+***
+
+## Conclusion
+
+When looking at these two models, Logistic Regression and SVM, the SVM model performed better both on the **F1-Score** and **Accuracy** counts. However, the 'better' performance is only marginally better. If I had to choose between these two models, I would most likely go with the more simpler of the two, Logistic Regression. 
+
+***
+
+### Next Steps
+
+This was my first attempt at solving this problem. With more time, I think there are some additional things that could be done to further improve the model performance. 
+
+Here are a few that I would explore first:
+
+1) Imputing data for `Cabin`, and taking a closer look at this variable.
+
+2) Create new predictors with a combination of existing predictors, sometimes referred to as Feature Engineering.
+
+3) Experiment with removing all records that have missing values; no imputation.
+
+4) Try out a few other imputation methods, to see if different `Age` values are imputed, providing a better performing model.
+
+5) Stacking multiple model types into one model for better performance.
+
+6) Perform some sort of Feature Selection/Dimension Reduction; such as best subset.
